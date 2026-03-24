@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include <dlfcn.h>
 #include <unistd.h>
@@ -133,6 +134,359 @@ nlohmann::json py_object_to_json(const py::object& o) {
 py::object json_to_py_object(const nlohmann::json& j) {
     py::object loads = py::module_::import("json").attr("loads");
     return loads(j.dump());
+}
+
+std::unordered_map<std::string, std::string> autobind_sections_with_treesitter(
+    const std::unordered_map<std::string, std::string>& sections, bool verbose) {
+    py::dict globals;
+    globals["py_code"] = py::str(sections.count("py") ? sections.at("py") : "");
+    globals["js_code"] = py::str(sections.count("js") ? sections.at("js") : "");
+    globals["cpp_code"] = py::str(sections.count("cpp") ? sections.at("cpp") : "");
+
+    // Uses tree-sitter + tree_sitter_languages to discover function declarations and
+    // emits binding code so users do not manually call runtime.register in each section.
+    py::exec(R"PY(
+import json
+
+try:
+    from tree_sitter import Parser, Language
+except Exception as exc:
+    raise RuntimeError(
+        "Tree-sitter auto-bind requires Python package 'tree_sitter'. Install "
+        "it (for example: pip install tree_sitter)."
+    ) from exc
+
+_LANG_CACHE = {}
+
+def _load_lang(name):
+    if name in _LANG_CACHE:
+        return _LANG_CACHE[name]
+    # Preferred path when available.
+    try:
+        from tree_sitter_languages import get_language  # type: ignore
+        lang = get_language(name)
+        _LANG_CACHE[name] = lang
+        return lang
+    except Exception:
+        pass
+    # Fallback for Python 3.13-friendly split packages.
+    mod_name = {
+        "python": "tree_sitter_python",
+        "javascript": "tree_sitter_javascript",
+        "cpp": "tree_sitter_cpp",
+    }.get(name)
+    if not mod_name:
+        raise RuntimeError(f"Unsupported language for auto-bind: {name}")
+    try:
+        mod = __import__(mod_name)
+        lang = Language(mod.language())
+        _LANG_CACHE[name] = lang
+        return lang
+    except Exception as exc:
+        raise RuntimeError(
+            "Tree-sitter language module missing for '" + name + "'. "
+            "Install either 'tree_sitter_languages' or split packages: "
+            "tree_sitter_python tree_sitter_javascript tree_sitter_cpp."
+        ) from exc
+
+def _mk_parser(lang_name):
+    lang = _load_lang(lang_name)
+    parser = Parser(lang)
+    return parser
+
+def _node_text(code_b, node):
+    return code_b[node.start_byte:node.end_byte].decode("utf-8")
+
+def _ident_from_param_text(param_text):
+    s = param_text.strip()
+    if not s:
+        return None
+    # Drop defaults and basic punct.
+    if "=" in s:
+        s = s.split("=", 1)[0].strip()
+    s = s.lstrip("*&").strip()
+    parts = [p for p in s.replace("\n", " ").split(" ") if p]
+    if not parts:
+        return None
+    last = parts[-1].strip()
+    last = last.strip("*,&")
+    if not last:
+        return None
+    # Skip obvious non-identifiers.
+    if any(ch in last for ch in "[]()<>:"):
+        return None
+    return last
+
+def parse_python_functions(code):
+    if not code.strip():
+        return []
+    parser = _mk_parser("python")
+    code_b = code.encode("utf-8")
+    tree = parser.parse(code_b)
+    root = tree.root_node
+    out = []
+    for n in root.children:
+        if n.type != "function_definition":
+            continue
+        name = None
+        params = []
+        for c in n.children:
+            if c.type == "identifier":
+                name = _node_text(code_b, c)
+            elif c.type == "parameters":
+                txt = _node_text(code_b, c)
+                if txt.startswith("(") and txt.endswith(")"):
+                    txt = txt[1:-1]
+                raw = [p.strip() for p in txt.split(",") if p.strip()]
+                for p in raw:
+                    if p.startswith("*"):
+                        continue
+                    if "=" in p:
+                        p = p.split("=", 1)[0].strip()
+                    if ":" in p:
+                        p = p.split(":", 1)[0].strip()
+                    if p:
+                        params.append(p)
+        if name:
+            out.append({"name": name, "params": params})
+    return out
+
+def parse_js_functions(code):
+    if not code.strip():
+        return []
+    parser = _mk_parser("javascript")
+    code_b = code.encode("utf-8")
+    tree = parser.parse(code_b)
+    root = tree.root_node
+    out = []
+    def walk(node):
+        if node.type == "function_declaration":
+            name = None
+            params = []
+            for c in node.children:
+                if c.type == "identifier" and name is None:
+                    name = _node_text(code_b, c)
+                elif c.type == "formal_parameters":
+                    txt = _node_text(code_b, c)
+                    if txt.startswith("(") and txt.endswith(")"):
+                        txt = txt[1:-1]
+                    params = [p.strip() for p in txt.split(",") if p.strip()]
+            if name:
+                out.append({"name": name, "params": params})
+        for ch in node.children:
+            walk(ch)
+    walk(root)
+    return out
+
+def _parse_cpp_param_decl(param_text):
+    p = param_text.strip()
+    if not p or p == "void":
+        return None
+    if "=" in p:
+        p = p.split("=", 1)[0].strip()
+    chunks = p.replace("\n", " ").split()
+    if len(chunks) < 2:
+        return None
+    name = chunks[-1].strip("&*")
+    ctype = " ".join(chunks[:-1]).strip()
+    if not name or not ctype:
+        return None
+    return {"name": name, "ctype": ctype}
+
+def parse_cpp_json_functions(code):
+    if not code.strip():
+        return {"init_runtime_present": False, "functions": []}
+    parser = _mk_parser("cpp")
+    code_b = code.encode("utf-8")
+    tree = parser.parse(code_b)
+    root = tree.root_node
+    init_runtime_present = False
+    fns = []
+    def walk(node):
+        nonlocal init_runtime_present
+        if node.type == "function_definition":
+            txt = _node_text(code_b, node)
+            head = txt.split("{", 1)[0]
+            if "init_runtime" in head:
+                init_runtime_present = True
+            if "init_runtime" in head:
+                return
+            if "(" not in head or ")" not in head:
+                return
+            before_paren = head.split("(", 1)[0].strip()
+            ret = " ".join(before_paren.split()[:-1]).strip()
+            name = before_paren.split()[-1].strip("*&")
+            if not name or name in ("if", "for", "while", "switch"):
+                return
+            if "::" in name:
+                return
+            params_txt = head.split("(", 1)[1].rsplit(")", 1)[0]
+            params = [p.strip() for p in params_txt.split(",") if p.strip()]
+            parsed_params = []
+            for p in params:
+                parsed = _parse_cpp_param_decl(p)
+                if not parsed:
+                    return
+                parsed_params.append(parsed)
+            fns.append({"name": name, "return_type": ret, "params": parsed_params})
+        for ch in node.children:
+            walk(ch)
+    walk(root)
+    dedup = []
+    seen = set()
+    for f in fns:
+        if f["name"] in seen:
+            continue
+        seen.add(f["name"])
+        dedup.append(f)
+    return {"init_runtime_present": init_runtime_present, "functions": dedup}
+
+def build_py_autobind(py_code, fns):
+    if not fns:
+        return py_code
+    lines = []
+    lines.append("")
+    lines.append("# --- mlxf auto-bind (generated via tree-sitter) ---")
+    lines.append("def __mlxf__as_dict(v, param_names=None):")
+    lines.append("    if v is None:")
+    lines.append("        return {}")
+    lines.append("    if isinstance(v, dict):")
+    lines.append("        return v")
+    lines.append("    if isinstance(v, (list, tuple)):")
+    lines.append("        names = list(param_names or [])")
+    lines.append("        return { (names[i] if i < len(names) else f'arg{i}'): v[i] for i in range(len(v)) }")
+    lines.append("    raise TypeError('runtime.call args must be a dict/object/array')")
+    for f in fns:
+        name = f["name"]
+        params = f.get("params", [])
+        lines.append(f"def __mlxf__wrap__{name}(__mlxf_args):")
+        lines.append(f"    __mlxf_params = {repr(params)}")
+        lines.append("    __mlxf_d = __mlxf__as_dict(__mlxf_args, __mlxf_params)")
+        if len(params) == 1 and params[0] in ("args", "payload", "data"):
+            lines.append(f"    return {name}(__mlxf_d)")
+        elif len(params) == 0:
+            lines.append(f"    return {name}()")
+        else:
+            lines.append(f"    return {name}(**__mlxf_d)")
+        lines.append(f"runtime.register('{name}', __mlxf__wrap__{name})")
+    return py_code + "\n" + "\n".join(lines) + "\n"
+
+def build_js_autobind(js_code, fns):
+    if not fns:
+        return js_code
+    lines = []
+    lines.append("")
+    lines.append("// --- mlxf auto-bind (generated via tree-sitter) ---")
+    lines.append("function __mlxf__asObject(v, paramNames) {")
+    lines.append("  if (v === undefined || v === null) return {};")
+    lines.append("  if (Array.isArray(v)) {")
+    lines.append("    const out = {};")
+    lines.append("    const names = paramNames || [];")
+    lines.append("    for (let i = 0; i < v.length; i += 1) {")
+    lines.append("      out[(i < names.length) ? names[i] : `arg${i}`] = v[i];")
+    lines.append("    }")
+    lines.append("    return out;")
+    lines.append("  }")
+    lines.append("  if (typeof v !== 'object') {")
+    lines.append("    throw new TypeError('runtime.call args must be an object');")
+    lines.append("  }")
+    lines.append("  return v;")
+    lines.append("}")
+    for f in fns:
+        name = f["name"]
+        params = f.get("params", [])
+        lines.append(f"runtime.register('{name}', function(__mlxf_args) {{")
+        lines.append(f"  const __mlxf_params = {json.dumps(params)};")
+        lines.append("  const __mlxf_d = __mlxf__asObject(__mlxf_args, __mlxf_params);")
+        if len(params) == 1 and params[0] in ("args", "payload", "data"):
+            lines.append(f"  return {name}(__mlxf_d);")
+        elif len(params) == 0:
+            lines.append(f"  return {name}();")
+        else:
+            param_list = ", ".join([f"__mlxf_d[{json.dumps(p)}]" for p in params])
+            lines.append(f"  return {name}({param_list});")
+        lines.append("});")
+    return js_code + "\n" + "\n".join(lines) + "\n"
+
+def build_cpp_autobind(cpp_code, cpp_meta):
+    if not cpp_code.strip():
+        return cpp_code
+    if cpp_meta.get("init_runtime_present", False):
+        return cpp_code
+    fns = cpp_meta.get("functions", [])
+    if not fns:
+        return cpp_code
+    lines = []
+    lines.append("")
+    lines.append("// --- mlxf auto-bind (generated via tree-sitter) ---")
+    lines.append('extern "C" void init_runtime(void* rt_ptr) {')
+    lines.append("    auto* rt = static_cast<Runtime*>(rt_ptr);")
+    lines.append("    auto __mlxf_get_arg = [](const nlohmann::json& args, const std::string& key, size_t idx) -> nlohmann::json {")
+    lines.append("        if (args.is_object() && args.contains(key)) return args.at(key);")
+    lines.append("        if (args.is_array() && idx < args.size()) return args.at(idx);")
+    lines.append("        return nlohmann::json();")
+    lines.append("    };")
+    for f in fns:
+        name = f["name"]
+        ret = f.get("return_type", "")
+        params = f.get("params", [])
+        lines.append(f'    rt->register_function("{name}", [&](const nlohmann::json& __mlxf_in) -> nlohmann::json {{')
+        arg_names = []
+        for i, p in enumerate(params):
+            pname = p["name"]
+            ptype = p["ctype"]
+            arg_names.append(pname)
+            pnorm = ptype.replace("const", "").replace("&", "").replace("*", "").strip()
+            if pnorm == "nlohmann::json" or pnorm == "json":
+                if len(params) == 1:
+                    lines.append(f'        {ptype} {pname} = __mlxf_in;')
+                else:
+                    lines.append(f'        auto __mlxf_v{i} = __mlxf_get_arg(__mlxf_in, "{pname}", {i});')
+                    lines.append(f'        {ptype} {pname} = __mlxf_v{i};')
+            elif pnorm in ("std::string", "string"):
+                lines.append(f'        auto __mlxf_v{i} = __mlxf_get_arg(__mlxf_in, "{pname}", {i});')
+                lines.append(f'        {ptype} {pname} = __mlxf_v{i}.is_null() ? std::string{{}} : __mlxf_v{i}.get<std::string>();')
+            else:
+                lines.append(f'        auto __mlxf_v{i} = __mlxf_get_arg(__mlxf_in, "{pname}", {i});')
+                lines.append(f'        {ptype} {pname} = __mlxf_v{i}.is_null() ? {ptype}{{}} : __mlxf_v{i}.get<{ptype}>();')
+        call_expr = f"{name}(" + ", ".join(arg_names) + ")"
+        if "void" == ret.strip():
+            lines.append(f"        {call_expr};")
+            lines.append("        return nlohmann::json::object();")
+        elif "json" in ret:
+            lines.append(f"        return {call_expr};")
+        else:
+            lines.append(f"        return nlohmann::json({call_expr});")
+        lines.append("    });")
+    lines.append("}")
+    return cpp_code + "\n" + "\n".join(lines) + "\n"
+
+py_funcs = parse_python_functions(py_code)
+js_funcs = parse_js_functions(js_code)
+cpp_meta = parse_cpp_json_functions(cpp_code)
+
+result = {
+    "py": build_py_autobind(py_code, py_funcs),
+    "js": build_js_autobind(js_code, js_funcs),
+    "cpp": build_cpp_autobind(cpp_code, cpp_meta),
+}
+
+autobind_result_json = json.dumps(result)
+)PY",
+             globals, globals);
+
+    py::object json_result_obj = globals["autobind_result_json"];
+    nlohmann::json parsed = nlohmann::json::parse(py::cast<std::string>(json_result_obj));
+    std::unordered_map<std::string, std::string> out = sections;
+    out["py"] = parsed.value("py", sections.count("py") ? sections.at("py") : "");
+    out["js"] = parsed.value("js", sections.count("js") ? sections.at("js") : "");
+    out["cpp"] = parsed.value("cpp", sections.count("cpp") ? sections.at("cpp") : "");
+
+    if (verbose) {
+        std::cerr << kBlue << "[mlxf] " << kReset
+                  << "Auto-bind enabled (tree-sitter metadata extracted)." << std::endl;
+    }
+    return out;
 }
 
 struct V8Host;
@@ -303,7 +657,7 @@ void run_python_section(Runtime& runtime, const std::string& code, bool verbose)
         std::cerr << kBlue << "--- Python (/py) ---" << kReset << "\n"
                   << code << std::endl;
     }
-    py::dict global = py::dict();
+    py::dict global = py::module_::import("__main__").attr("__dict__");
     global["runtime"] = py::cast(&runtime, py::return_value_policy::reference);
     py::exec(code, global, global);
 }
@@ -476,6 +830,37 @@ bool compile_and_load_cpp(Runtime& runtime, const std::string& cpp_body, const O
     return true;
 }
 
+void install_python_runtime_proxies(Runtime& runtime, bool verbose) {
+    py::dict global = py::module_::import("__main__").attr("__dict__");
+    global["runtime"] = py::cast(&runtime, py::return_value_policy::reference);
+    py::list names;
+    for (const auto& n : runtime.list_functions()) {
+        names.append(py::str(n));
+    }
+    global["__mlxf_names"] = names;
+    py::exec(R"PY(
+def __mlxf_make_proxy(__name):
+    def _f(*args, **kwargs):
+        if kwargs:
+            return runtime.call(__name, kwargs)
+        if len(args) == 1 and isinstance(args[0], dict):
+            return runtime.call(__name, args[0])
+        return runtime.call(__name, list(args))
+    return _f
+
+for __mlxf_n in __mlxf_names:
+    existing = globals().get(__mlxf_n, None)
+    if callable(existing):
+        continue
+    globals()[__mlxf_n] = __mlxf_make_proxy(__mlxf_n)
+)PY",
+             global, global);
+    if (verbose) {
+        std::cerr << kBlue << "[mlxf] " << kReset
+                  << "Installed Python direct-call proxies for registered functions." << std::endl;
+    }
+}
+
 void run_main_section(Runtime& runtime, const std::string& code, bool verbose) {
     if (code.empty()) {
         throw std::runtime_error("Missing /main section");
@@ -485,8 +870,29 @@ void run_main_section(Runtime& runtime, const std::string& code, bool verbose) {
         std::cerr << kBlue << "--- Main (/main) ---" << kReset << "\n"
                   << code << std::endl;
     }
-    py::dict global = py::dict();
+    py::dict global = py::module_::import("__main__").attr("__dict__");
     global["runtime"] = py::cast(&runtime, py::return_value_policy::reference);
+    std::istringstream iss(code);
+    std::string line;
+    std::vector<std::string> non_empty_lines;
+    while (std::getline(iss, line)) {
+        std::string t = trim(line);
+        if (!t.empty()) {
+            non_empty_lines.push_back(t);
+        }
+    }
+    bool single_expr = non_empty_lines.size() == 1;
+    if (single_expr) {
+        try {
+            py::object result = py::eval(non_empty_lines.front(), global, global);
+            if (!result.is_none()) {
+                py::print(result);
+            }
+            return;
+        } catch (const py::error_already_set&) {
+            // Fallback to regular exec when it's not a valid expression.
+        }
+    }
     py::exec(code, global, global);
 }
 
@@ -545,6 +951,7 @@ int main(int argc, char** argv) {
         py::scoped_interpreter guard{};
         try {
             register_runtime_pybind_once();
+            sections = autobind_sections_with_treesitter(sections, opt.verbose);
 
             run_python_section(runtime, sections.count("py") ? sections["py"] : "", opt.verbose);
 
@@ -561,6 +968,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
 
+            install_python_runtime_proxies(runtime, opt.verbose);
             run_main_section(runtime, sections.count("main") ? sections["main"] : "", opt.verbose);
         } catch (const py::error_already_set& e) {
             std::cerr << kRed << "[mlxf] " << kReset << "Python error:\n"

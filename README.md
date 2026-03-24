@@ -11,6 +11,9 @@ Single-executable runtime that reads **one `.poly` file** with sections for C++,
 - **C++20** compiler (`g++` recommended; also used to compile `/cpp` sections at runtime)
 - **CMake** 3.20+
 - **Python 3** development headers and libraries
+- Python packages for auto-bind parsing:
+  - preferred: `tree_sitter` + `tree_sitter_languages`
+  - fallback (works on newer Python versions): `tree_sitter_python`, `tree_sitter_javascript`, `tree_sitter_cpp`
 - **nlohmann/json**, **pybind11** — fetched automatically via **CMake FetchContent** (optional copies may live under `third_party/` if you prefer submodules)
 - **V8** — linked from your GN build (see below). The embedder uses the **public V8 API** directly for the `/js` `runtime` object (no v8pp).
 - **Google V8** — must be built separately; mlxf links against the **same layout** as the official `samples/hello-world.cc` build (see below).
@@ -62,13 +65,23 @@ You can override individual libraries if needed: `V8_MONOLITH_LIB`, `V8_LIBBASE_
 ./build/mlxf --no-cleanup-temps example.poly # keep temp .cpp/.so for debugging
 ```
 
+Install auto-bind parser deps if needed:
+
+```bash
+python3 -m pip install --user tree_sitter tree_sitter_languages
+# or fallback:
+python3 -m pip install --user tree_sitter tree_sitter_python tree_sitter_javascript tree_sitter_cpp
+```
+
 ## File format
+
+Detailed syntax and behavior reference: [`POLY_SYNTAX.md`](POLY_SYNTAX.md)
 
 Section headers use a leading slash (not `#`):
 
-- `/cpp` — C++; must define `extern "C" void init_runtime(void* rt_ptr);` and register functions on the `Runtime*`
-- `/py` — Python; may use `runtime.register(name, func)` and `runtime.call(name, args)`
-- `/js` — JavaScript (V8); may use `runtime.register(name, fn)` and `runtime.call(name, obj)`
+- `/cpp` — C++; manual `init_runtime` is optional (auto-generated when missing)
+- `/py` — Python; top-level `def` functions are auto-registered
+- `/js` — JavaScript (V8); `function name(...) {}` declarations are auto-registered
 - `/main` — Python entry; always runs last and typically calls into other languages via `runtime.call`
 
 ## Execution order

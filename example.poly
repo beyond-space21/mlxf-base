@@ -2,38 +2,58 @@
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
 
-extern "C" void init_runtime(void* rt_ptr) {    
-    auto* rt = static_cast<Runtime*>(rt_ptr);
-    rt->register_function("cpp_add", [](const json& args) -> json {
-        int a = args.value("a", 0);
-        int b = args.value("b", 0);
-        return {{"result", a + b}};
-    });
+// 1) Typed C++ args (auto-bound by name/position)
+int add(int a, int b) {
+    return a + b;
+}
+
+// 2) JSON-style C++ args (manual extraction still works)
+json cpp_add_json(const json& args) {
+    int a = args.value("a", 0);
+    int b = args.value("b", 0);
+    return {{"result", a + b}, {"from", "cpp_json"}};
+}
+
+// 3) No-arg C++ function
+std::string cpp_banner() {
+    return "C++ ready";
 }
 
 /py
-def py_multiply(args):
-    return {"result": args["a"] * args["b"]}
+def py_multiply(a, b):
+    return a * b
 
-runtime.register("py_multiply", py_multiply)
+def pipeline(a, b, name):
+    # Direct calls to cross-language functions via installed proxies.
+    total = add(a, b)                  # C++
+    msg = js_greet(name)               # JS
+    return {"sum": total, "greet": msg}
+
+def use_runtime_call_compat(a, b):
+    # Backward-compatible style still works.
+    return runtime.call("cpp_add_json", {"a": a, "b": b})
 
 /js
-function js_greet(args) {
-    return {result: "Hello " + args.name + " from JavaScript!"};
+function js_greet(name) {
+    return "Hello " + name + " from JavaScript!";
 }
 
-runtime.register("js_greet", js_greet);
+function js_mul(a, b) {
+    return a * b;
+}
 
 /main
-print("Starting polyglot execution...")
+print("=== PolyRun Capability Demo ===")
 
-res1 = runtime.call("cpp_add", {"a": 40, "b": 2})
-print("C++ result:", res1["result"])
+print("cpp_banner() =>", cpp_banner())
+print("add(40, 2) =>", add(40, 2))
+print("js_mul(6, 7) =>", js_mul(6, 7))
+print("py_multiply(6, 7) =>", py_multiply(6, 7))
 
-res2 = runtime.call("py_multiply", {"a": 6, "b": 7})
-print("Python result:", res2["result"])
+obj = pipeline(10, 32, "PolyRun")
+print("pipeline(...) =>", obj)
 
-res3 = runtime.call("js_greet", {"name": "Rajanand"})
-print("JS result:", res3["result"])
+compat = use_runtime_call_compat(4, 5)
+print("runtime.call compatibility =>", compat)
 
-print("Done!")
+print("DONE")

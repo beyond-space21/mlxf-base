@@ -55,6 +55,16 @@ bool Runtime::has_function(const std::string& name) const {
     return functions_.find(name) != functions_.end();
 }
 
+std::vector<std::string> Runtime::list_functions() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::string> names;
+    names.reserve(functions_.size());
+    for (const auto& kv : functions_) {
+        names.push_back(kv.first);
+    }
+    return names;
+}
+
 void Runtime::clear_functions() {
     std::lock_guard<std::mutex> lock(mutex_);
     functions_.clear();

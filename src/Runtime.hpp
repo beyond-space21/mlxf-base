@@ -4,6 +4,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -18,6 +19,7 @@ public:
                           const nlohmann::json& args = nlohmann::json::object());
 
     bool has_function(const std::string& name) const;
+    std::vector<std::string> list_functions() const;
 
     /// Drop all registered callbacks. Call before destroying the V8 isolate when any
     /// callback holds v8::Global handles (e.g. JS-registered functions).
