@@ -1,0 +1,81 @@
+{
+  "scopeName": "source.poly",
+  "name": "PolyRun",
+  "patterns": [
+    {
+      "include": "#frontmatter"
+    },
+    {
+      "include": "#sections"
+    }
+  ],
+  "repository": {
+    "frontmatter": {
+      "begin": "^(---)$",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.frontmatter.poly" }
+      },
+      "end": "^(---)$",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.frontmatter.poly" }
+      },
+      "contentName": "source.yaml",
+      "patterns": [{ "include": "source.yaml" }]
+    },
+    "sections": {
+      "patterns": [
+        { "include": "#section-cpp" },
+        { "include": "#section-python" },
+        { "include": "#section-javascript" },
+        { "include": "#section-main" }
+      ]
+    },
+    "section-cpp": {
+      "begin": "^(/)\\s*(cpp)\\s*$",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.section.poly" },
+        "2": { "name": "entity.name.section.language.poly" }
+      },
+      "end": "^(?=/\\s*(cpp|python|javascript|main|py|js)\\s*$)|\\z",
+      "contentName": "source.cpp",
+      "patterns": [{ "include": "source.cpp" }]
+    },
+    "section-python": {
+      "begin": "^(/)\\s*(python|py)\\s*$",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.section.poly" },
+        "2": { "name": "entity.name.section.language.poly" }
+      },
+      "end": "^(?=/\\s*(cpp|python|javascript|main|py|js)\\s*$)|\\z",
+      "contentName": "source.python",
+      "patterns": [{ "include": "source.python" }]
+    },
+    "section-javascript": {
+      "begin": "^(/)\\s*(javascript|js)\\s*$",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.section.poly" },
+        "2": { "name": "entity.name.section.language.poly" }
+      },
+      "end": "^(?=/\\s*(cpp|python|javascript|main|py|js)\\s*$)|\\z",
+      "contentName": "source.js",
+      "patterns": [{ "include": "source.js" }]
+    },
+    "section-main": {
+      "begin": "^(/)\\s*(main)\\s*$",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.section.poly" },
+        "2": { "name": "entity.name.section.language.poly" }
+      },
+      "end": "^(?=/\\s*(cpp|python|javascript|main|py|js)\\s*$)|\\z",
+      "contentName": "source.python",
+      "patterns": [{ "include": "source.python" }]
+    },
+    "section-boundary": {
+      "match": "^(/)\\s*(cpp|python|javascript|main|py|js)\\s*$",
+      "captures": {
+        "1": { "name": "punctuation.definition.section.poly" },
+        "2": { "name": "entity.name.section.language.poly" }
+      }
+    }    
+  }
+}

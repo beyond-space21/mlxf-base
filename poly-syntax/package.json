@@ -1,0 +1,32 @@
+{
+  "name": "poly-syntax",
+  "displayName": "PolyRun Syntax",
+  "description": "Syntax highlighting for .poly files (YAML frontmatter + embedded C++/Python/JS)",
+  "version": "1.0.0",
+  "publisher": "rajanand",
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:poly"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "poly",
+        "aliases": ["PolyRun", "poly"],
+        "extensions": [".poly"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "poly",
+        "scopeName": "source.poly",
+        "path": "./syntaxes/poly.tmLanguage.json"
+      }
+    ]
+  }
+}

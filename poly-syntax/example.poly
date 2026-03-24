@@ -1,0 +1,83 @@
+---
+name: poly_run_target_demo
+version: 1.0.0
+description: Full polyglot demo with typed C++ + direct calls
+author: Rajanand
+entrypoint: main
+
+dependencies:
+  python: []
+  cpp: [nlohmann/json]
+  javascript: []
+
+config:
+  log_level: info
+---
+
+/cpp
+#include <nlohmann/json.hpp>
+using json = nlohmann::json;
+
+std::string banner() {
+    return "PolyRun C++ online (NEW FORMAT)";
+}
+
+int add(int a, int b) {
+    return a + b;
+}
+
+json cpp_heavy(const json& args) {
+    int x = args.value("x", 0);
+    int y = args.value("y", 0);
+    return {{"product", x * y}, {"sum", x + y}, {"tag", "cpp_heavy_new"}};
+}
+
+
+
+
+/python
+def py_multiply(a, b):
+    return a * b
+
+def pipeline(a, b, name):
+    total = add(a, b)                  # direct C++ call
+    msg   = js_greet(name)             # direct JS call
+    heavy = cpp_heavy({"x": 5, "y": 6})
+    return {"result": total, "greet": msg, "heavy": heavy}
+
+def use_runtime_call_compat(a, b):
+    return runtime.call("add", {"a": a, "b": b})
+
+
+
+
+/javascript
+function js_greet(name) {
+    return "Hello " + name + " from JavaScript! (NEW FORMAT)";
+}
+
+function js_mul(a, b) {
+    return a * b;
+}
+
+
+
+/main
+import time, os, psutil
+
+def profile_run():
+    start = time.perf_counter()
+    mem0 = psutil.Process().memory_info().rss / 1024 / 1024
+    
+    # your normal code here
+    for i in range(10_000):
+        pipeline(10, 10, "profile")
+    
+    total = time.perf_counter() - start
+    mem1 = psutil.Process().memory_info().rss / 1024 / 1024
+    
+    print(f"10k calls: {total:.3f}s → {total/10_000*1e6:.1f} µs/call")
+    print(f"Memory used: {mem1-mem0:.1f} MB")
+    print(f"Peak RSS: {mem1:.1f} MB")
+
+profile_run()
