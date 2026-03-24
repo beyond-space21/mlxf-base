@@ -1,25 +1,9 @@
----
-name: poly_run_target_demo
-version: 1.0.0
-description: Full polyglot demo with typed C++ + direct calls
-author: Rajanand
-entrypoint: main
-
-dependencies:
-  python: []
-  cpp: [nlohmann/json]
-  javascript: []
-
-config:
-  log_level: info
----
-
 /cpp
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
 
 std::string banner() {
-    return "PolyRun C++ online";
+    return "PolyRun C++ online (legacy)";
 }
 
 int add(int a, int b) {
@@ -29,7 +13,7 @@ int add(int a, int b) {
 json cpp_heavy(const json& args) {
     int x = args.value("x", 0);
     int y = args.value("y", 0);
-    return {{"product", x * y}, {"sum", x + y}, {"tag", "cpp_heavy"}};
+    return {{"product", x * y}, {"sum", x + y}, {"tag", "cpp_heavy_legacy"}};
 }
 
 /py
@@ -47,7 +31,7 @@ def use_runtime_call_compat(a, b):
 
 /js
 function js_greet(name) {
-    return "Hello " + name + " from JavaScript!";
+    return "Hello " + name + " from JavaScript! (legacy)";
 }
 
 function js_mul(a, b) {
@@ -55,7 +39,8 @@ function js_mul(a, b) {
 }
 
 /main
-print("=== PolyRun Capability Demo ===")
+print("=== PolyRun LEGACY Demo (old /cpp format) ===")
+
 print("banner() =>", banner())
 print("add(40, 2) =>", add(40, 2))
 print("js_mul(6, 7) =>", js_mul(6, 7))
@@ -64,7 +49,7 @@ print("py_multiply(6, 7) =>", py_multiply(6, 7))
 obj = pipeline(10, 10, "Rajanand")
 print("pipeline(...) =>", obj)
 
-compat = runtime.call("add", {"a": 2, "b": 2})
+compat = use_runtime_call_compat(2, 2)
 print("runtime.call(add) =>", compat)
 
-print("DONE")
+print("✅ LEGACY MODE WORKS PERFECTLY")

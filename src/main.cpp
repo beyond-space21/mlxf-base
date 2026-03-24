@@ -50,8 +50,102 @@ struct Options {
     std::string poly_path;
 };
 
-void log_section(const char* section, const char* color) {
-    std::cerr << color << "[mlxf] " << kReset << "Loaded section /" << section << std::endl;
+struct PolyRunMetadata {
+    std::string name;
+    std::string version;
+    std::string description;
+    std::string author;
+    std::string entrypoint = "main";
+    std::unordered_map<std::string, std::vector<std::string>> dependencies;
+    std::unordered_map<std::string, std::string> config;
+};
+
+struct ParsedPolyFile {
+    PolyRunMetadata metadata;
+    std::unordered_map<std::string, std::string> sections;
+    bool used_new_format = false;
+};
+
+std::string trim(std::string_view s);
+
+void log_section(const char* section, const char* color, bool used_new_format) {
+    if (used_new_format) {
+        std::cerr << color << "[mlxf] " << kReset << "Loaded section " << section
+                  << " (new format)" << std::endl;
+    } else {
+        std::cerr << color << "[mlxf] " << kReset << "Loaded section /" << section << std::endl;
+    }
+}
+
+std::vector<std::string> split_csv_like_list(const std::string& in) {
+    std::vector<std::string> out;
+    std::string s = trim(in);
+    if (s.size() >= 2 && s.front() == '[' && s.back() == ']') {
+        s = s.substr(1, s.size() - 2);
+    }
+    std::string item;
+    std::istringstream iss(s);
+    while (std::getline(iss, item, ',')) {
+        std::string t = trim(item);
+        if (t.empty()) {
+            continue;
+        }
+        if ((t.front() == '"' && t.back() == '"') || (t.front() == '\'' && t.back() == '\'')) {
+            t = t.substr(1, t.size() - 2);
+        }
+        out.push_back(t);
+    }
+    return out;
+}
+
+void parse_frontmatter_block(const std::vector<std::string>& fm_lines, PolyRunMetadata& md) {
+    std::string block;
+    for (const auto& raw : fm_lines) {
+        std::string ln = raw;
+        if (!ln.empty() && ln.back() == '\r') {
+            ln.pop_back();
+        }
+        std::string t = trim(ln);
+        if (t.empty() || t.rfind("#", 0) == 0) {
+            continue;
+        }
+        bool indented = !ln.empty() && (ln[0] == ' ' || ln[0] == '\t');
+        if (!indented) {
+            const size_t colon = ln.find(':');
+            if (colon == std::string::npos) {
+                continue;
+            }
+            std::string key = trim(ln.substr(0, colon));
+            std::string val = trim(ln.substr(colon + 1));
+            if (key == "dependencies") {
+                block = "dependencies";
+                continue;
+            }
+            if (key == "config") {
+                block = "config";
+                continue;
+            }
+            block.clear();
+            if (key == "name") md.name = val;
+            else if (key == "version") md.version = val;
+            else if (key == "description") md.description = val;
+            else if (key == "author") md.author = val;
+            else if (key == "entrypoint") md.entrypoint = val;
+            continue;
+        }
+
+        const size_t colon = t.find(':');
+        if (colon == std::string::npos) {
+            continue;
+        }
+        const std::string key = trim(t.substr(0, colon));
+        const std::string val = trim(t.substr(colon + 1));
+        if (block == "dependencies") {
+            md.dependencies[key] = split_csv_like_list(val);
+        } else if (block == "config") {
+            md.config[key] = val;
+        }
+    }
 }
 
 std::string trim(std::string_view s) {
@@ -92,34 +186,158 @@ bool is_section_header(std::string_view line, std::string& out_name) {
     return false;
 }
 
-std::unordered_map<std::string, std::string> parse_poly_file(const std::string& path) {
+bool normalize_new_section_name(std::string_view raw, std::string& out_name) {
+    std::string n = trim(raw);
+    if (n == "cpp") {
+        out_name = "cpp";
+        return true;
+    }
+    if (n == "py" || n == "python") {
+        out_name = "py";
+        return true;
+    }
+    if (n == "js" || n == "javascript") {
+        out_name = "js";
+        return true;
+    }
+    if (n == "main") {
+        out_name = "main";
+        return true;
+    }
+    return false;
+}
+
+bool is_new_section_header(std::string_view line, std::string& out_name) {
+    std::string t = trim(line);
+    if (t.rfind("---", 0) != 0) {
+        return false;
+    }
+    std::string rest = trim(t.substr(3));
+    if (rest.empty()) {
+        return false;
+    }
+    // New format uses one section token, e.g. "--- python"
+    if (rest.find(' ') != std::string::npos || rest.find('\t') != std::string::npos) {
+        return false;
+    }
+    return normalize_new_section_name(rest, out_name);
+}
+
+ParsedPolyFile parse_poly_file(const std::string& path) {
     std::ifstream in(path);
     if (!in) {
         throw std::runtime_error("Cannot open .poly file: " + path);
     }
-    std::unordered_map<std::string, std::string> sections;
-    std::string current;
-    std::ostringstream buf;
+    std::vector<std::string> lines;
     std::string line;
     while (std::getline(in, line)) {
+        lines.push_back(line);
+    }
+
+    ParsedPolyFile out;
+
+    // Slash-section parser is default: /cpp /py /js /main.
+    bool has_legacy_headers = false;
+    for (const auto& ln : lines) {
         std::string sec;
-        if (is_section_header(line, sec)) {
-            if (!current.empty()) {
-                sections[current] = buf.str();
-                buf.str("");
-                buf.clear();
+        if (is_section_header(ln, sec)) {
+            has_legacy_headers = true;
+            break;
+        }
+    }
+
+    if (has_legacy_headers) {
+        out.sections.clear();
+        std::string current;
+        std::ostringstream buf;
+        for (const auto& ln : lines) {
+            std::string sec;
+            if (is_section_header(ln, sec)) {
+                if (!current.empty()) {
+                    out.sections[current] = buf.str();
+                    buf.str("");
+                    buf.clear();
+                }
+                current = sec;
+                continue;
             }
-            current = sec;
-            continue;
+            if (!current.empty()) {
+                buf << ln << '\n';
+            }
         }
         if (!current.empty()) {
-            buf << line << '\n';
+            out.sections[current] = buf.str();
+        }
+        out.used_new_format = false;
+        return out;
+    }
+
+    // Fallback parser: optional YAML frontmatter + --- <section> blocks.
+    size_t i = 0;
+    while (i < lines.size() && trim(lines[i]).empty()) {
+        ++i;
+    }
+    if (i < lines.size() && trim(lines[i]) == "---") {
+        ++i;
+        bool fm_closed = false;
+        std::vector<std::string> fm_lines;
+        while (i < lines.size()) {
+            if (trim(lines[i]) == "---") {
+                fm_closed = true;
+                ++i;
+                break;
+            }
+            fm_lines.push_back(lines[i]);
+            ++i;
+        }
+        if (!fm_closed) {
+            throw std::runtime_error("Invalid .poly frontmatter: missing closing '---'");
+        }
+        parse_frontmatter_block(fm_lines, out.metadata);
+    }
+
+    bool saw_new_section = false;
+    std::string current_new;
+    std::ostringstream new_buf;
+    for (; i < lines.size(); ++i) {
+        const std::string t = trim(lines[i]);
+        std::string sec;
+        if (is_new_section_header(lines[i], sec)) {
+            saw_new_section = true;
+            if (!current_new.empty()) {
+                out.sections[current_new] = new_buf.str();
+                new_buf.str("");
+                new_buf.clear();
+            }
+            current_new = sec;
+            continue;
+        }
+        if (!current_new.empty() && t == "---") {
+            out.sections[current_new] = new_buf.str();
+            new_buf.str("");
+            new_buf.clear();
+            current_new.clear();
+            continue;
+        }
+        if (!current_new.empty()) {
+            new_buf << lines[i] << '\n';
         }
     }
-    if (!current.empty()) {
-        sections[current] = buf.str();
+    if (!current_new.empty()) {
+        out.sections[current_new] = new_buf.str();
     }
-    return sections;
+    if (saw_new_section) {
+        out.used_new_format = true;
+        return out;
+    }
+
+    // No recognized sections.
+    std::string current;
+    std::ostringstream buf;
+    (void)current;
+    (void)buf;
+    out.used_new_format = false;
+    return out;
 }
 
 nlohmann::json py_object_to_json(const py::object& o) {
@@ -648,11 +866,12 @@ static void JsCallCallback(const v8::FunctionCallbackInfo<v8::Value>& args) {
     args.GetReturnValue().Set(json_to_v8_value(isolate, context, out));
 }
 
-void run_python_section(Runtime& runtime, const std::string& code, bool verbose) {
+void run_python_section(Runtime& runtime, const std::string& code, bool verbose,
+                        bool used_new_format) {
     if (code.empty()) {
         return;
     }
-    log_section("py", kGreen);
+    log_section("py", kGreen, used_new_format);
     if (verbose) {
         std::cerr << kBlue << "--- Python (/py) ---" << kReset << "\n"
                   << code << std::endl;
@@ -663,11 +882,12 @@ void run_python_section(Runtime& runtime, const std::string& code, bool verbose)
 }
 
 void run_js_section(Runtime& runtime, const std::string& code, bool verbose,
-                    std::unique_ptr<V8Host>& host_out, const char* exec_path) {
+                    std::unique_ptr<V8Host>& host_out, const char* exec_path,
+                    bool used_new_format) {
     if (code.empty()) {
         return;
     }
-    log_section("js", kMagenta);
+    log_section("js", kMagenta, used_new_format);
     if (verbose) {
         std::cerr << kBlue << "--- JavaScript (/js) ---" << kReset << "\n"
                   << code << std::endl;
@@ -745,7 +965,7 @@ void run_js_section(Runtime& runtime, const std::string& code, bool verbose,
 }
 
 bool compile_and_load_cpp(Runtime& runtime, const std::string& cpp_body, const Options& opt,
-                          void** out_handle) {
+                          void** out_handle, bool used_new_format) {
     *out_handle = nullptr;
     if (cpp_body.empty() || opt.no_cpp_compile) {
         if (opt.no_cpp_compile && !cpp_body.empty()) {
@@ -754,7 +974,7 @@ bool compile_and_load_cpp(Runtime& runtime, const std::string& cpp_body, const O
         }
         return true;
     }
-    log_section("cpp", kGreen);
+    log_section("cpp", kGreen, used_new_format);
     if (opt.verbose) {
         std::cerr << kBlue << "--- C++ (/cpp) ---" << kReset << "\n"
                   << cpp_body << std::endl;
@@ -861,11 +1081,12 @@ for __mlxf_n in __mlxf_names:
     }
 }
 
-void run_main_section(Runtime& runtime, const std::string& code, bool verbose) {
+void run_main_section(Runtime& runtime, const std::string& code, bool verbose,
+                      bool used_new_format) {
     if (code.empty()) {
         throw std::runtime_error("Missing /main section");
     }
-    log_section("main", kGreen);
+    log_section("main", kGreen, used_new_format);
     if (verbose) {
         std::cerr << kBlue << "--- Main (/main) ---" << kReset << "\n"
                   << code << std::endl;
@@ -935,12 +1156,21 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::unordered_map<std::string, std::string> sections;
+    ParsedPolyFile parsed;
     try {
-        sections = parse_poly_file(opt.poly_path);
+        parsed = parse_poly_file(opt.poly_path);
     } catch (const std::exception& ex) {
         std::cerr << kRed << "[mlxf] " << kReset << ex.what() << std::endl;
         return 1;
+    }
+    std::unordered_map<std::string, std::string> sections = parsed.sections;
+    if (parsed.used_new_format && !parsed.metadata.name.empty()) {
+        std::cerr << kBlue << "[mlxf] " << kReset << "Loaded metadata: "
+                  << parsed.metadata.name;
+        if (!parsed.metadata.version.empty()) {
+            std::cerr << " v" << parsed.metadata.version;
+        }
+        std::cerr << std::endl;
     }
 
     Runtime runtime;
@@ -953,13 +1183,14 @@ int main(int argc, char** argv) {
             register_runtime_pybind_once();
             sections = autobind_sections_with_treesitter(sections, opt.verbose);
 
-            run_python_section(runtime, sections.count("py") ? sections["py"] : "", opt.verbose);
+            run_python_section(runtime, sections.count("py") ? sections["py"] : "", opt.verbose,
+                               parsed.used_new_format);
 
             run_js_section(runtime, sections.count("js") ? sections["js"] : "", opt.verbose, v8_host,
-                           argc > 0 && argv[0] ? argv[0] : "");
+                           argc > 0 && argv[0] ? argv[0] : "", parsed.used_new_format);
 
             if (!compile_and_load_cpp(runtime, sections.count("cpp") ? sections["cpp"] : "", opt,
-                                      &cpp_handle)) {
+                                      &cpp_handle, parsed.used_new_format)) {
                 runtime.clear_functions();
                 v8_host.reset();
                 if (cpp_handle) {
@@ -969,7 +1200,8 @@ int main(int argc, char** argv) {
             }
 
             install_python_runtime_proxies(runtime, opt.verbose);
-            run_main_section(runtime, sections.count("main") ? sections["main"] : "", opt.verbose);
+            run_main_section(runtime, sections.count("main") ? sections["main"] : "", opt.verbose,
+                             parsed.used_new_format);
         } catch (const py::error_already_set& e) {
             std::cerr << kRed << "[mlxf] " << kReset << "Python error:\n"
                       << e.what() << std::endl;

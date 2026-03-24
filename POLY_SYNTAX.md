@@ -14,6 +14,7 @@ A `.poly` file is a plain text file split into named sections. Each section star
 Everything after a header belongs to that section until the next valid section header appears.
 
 `mlxf` parses all sections first, runs Tree-sitter auto-bind generation, then executes in a fixed runtime order.
+Default authoring style is slash sections (`/cpp`, `/py`, `/js`, `/main`).
 
 ## Minimal Example
 
@@ -104,6 +105,7 @@ The parser in `src/main.cpp` has exact behavior worth knowing:
 - Content outside any recognized section is ignored.
 - Duplicate sections are allowed; the **last occurrence wins**.
   - Earlier content for the same section is overwritten by later section blocks.
+- New triple-dash section style is still accepted for compatibility, but slash sections are preferred.
 
 ## Cross-Language Contract
 
