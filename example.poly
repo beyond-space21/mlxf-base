@@ -1,0 +1,39 @@
+/cpp
+#include <nlohmann/json.hpp>
+using json = nlohmann::json;
+
+extern "C" void init_runtime(void* rt_ptr) {    
+    auto* rt = static_cast<Runtime*>(rt_ptr);
+    rt->register_function("cpp_add", [](const json& args) -> json {
+        int a = args.value("a", 0);
+        int b = args.value("b", 0);
+        return {{"result", a + b}};
+    });
+}
+
+/py
+def py_multiply(args):
+    return {"result": args["a"] * args["b"]}
+
+runtime.register("py_multiply", py_multiply)
+
+/js
+function js_greet(args) {
+    return {result: "Hello " + args.name + " from JavaScript!"};
+}
+
+runtime.register("js_greet", js_greet);
+
+/main
+print("Starting polyglot execution...")
+
+res1 = runtime.call("cpp_add", {"a": 40, "b": 2})
+print("C++ result:", res1["result"])
+
+res2 = runtime.call("py_multiply", {"a": 6, "b": 7})
+print("Python result:", res2["result"])
+
+res3 = runtime.call("js_greet", {"name": "Rajanand"})
+print("JS result:", res3["result"])
+
+print("Done!")
